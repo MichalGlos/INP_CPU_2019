@@ -1,0 +1,302 @@
+#!/bin/sh
+
+POSIXLY_CORRECT=yes
+
+str_month_to_number()                                                               # prevede textovou reprezentaci mesice "Feb/feb/FEB" na index mesice v roce
+{    
+    sed -r 's/Jan/01/g; s/Feb/02/g; s/Mar/03/g; s/Apr/04/g; s/May/05/g; s/Jun/06/g; s/Jul/07/g; s/Aug/08/g; s/Sep/09/g; s/Oct/10/g; s/Nov/11/g; s/Dec/12/g'
+}
+
+convert_arg_datetime()                                                                                              # prevadi cas z argumentu na format vhodny k porovnani
+{
+    tr -d " " | sed -r 's/-/ /g' | sed -r 's/:/ /g'                                # odstrani specialni znaky a nahradi je mezerami 
+}
+
+convert_log_datetime()                                                                                              # postupne nahrazuje oddelovace mezerama a serazuje datum podle vahy jednotky (YYYY MM DD HH MM SS)
+{
+    write_time | sed -r 's/\// /g' | sed -r 's/:/ /g' | awk '{ print $3" "$2" "$1" "$4" "$5" "$6 }' | str_month_to_number
+} 
+
+write_time()
+{ 
+    grep -o -E '[0-9]{2}/[A-Z][a-z]{2}/[0-9]{4}(:[0-9]{2}){3}'                                                          # najde na stdin a nasledne vypise data
+}
+
+write_uri()
+{
+    grep -o -E 'GET (/[^ ]*) ' | sed 's/GET //' | tr -d ' '                                                             # Najde v kazdem radku URI a posle na stdout
+}
+
+write_ip()
+{
+    grep -o -E '^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}|^([0-9a-fA-F]{0,4})?(:[0-9a-fA-F]{0,4}){2,7}'  # Nacita ze vstupu ip adresy                                   
+}
+
+hist_load()                                                                            # cte ze stdin a hleda vyskyt kazdeho radku v souboru
+{                                                                                # maximalni hodnota pro predani funkce pro vykresleni osy x
+    while read -r line
+    do
+        count=$( read_logs "$1" | filter_flags4 "$2" | grep -cE -e "$line" )                                            # pocet vyskytu v logu
+        printf "%s" "$line" | sed 's/\// /g; s/:/ /g;' | str_month_to_number | 
+        awk -v count="$count" '{ printf $3"-"$2"-"$1" "$4":00 ("count"): " 
+                                for ( i = count; i > 0; i--) printf "#" 
+                                printf "\n"}'                                                       # vypis urcite casy (upravene)                                             # vykresleni jeji cetnosti
+    done
+}
+
+hist_ip()                                                                            # cte ze stdin a hleda vyskyt kazdeho radku v souboru
+{                                                                                 # maximalni hodnota pro predani funkce pro vykresleni osy x
+    while read -r line
+    do
+        i=0
+        count=$( read_logs "$1" | filter_flags4 "$2" | grep -cE -e "$line" )                                            # pocet vyskytu v logu
+        printf "$line (%d): " "$count"                                                      # vypis urcite ip adresy
+        while [ "$i" -lt "$count" ]; do printf "#" ; i="$(( i + 1 ))" ; done                                          # vykresleni jeji cetnosti
+        printf "\n"
+    done
+}
+
+ip_hosts()                                                                          # identifikuje hosty podle ip adresy, v pripade nenalezeni vypise ip adrresu
+{
+     while read -r line
+     do                                                                                        # ulozi identifikaci podle ip do promenne
+        if hostLine=$(host "$line")                                                            # pri neuspesne identifikaci string zacina "^Host"
+        then
+            echo "$hostLine" | grep -E -o '([^ ]+\.$)'
+        else
+            echo "$line"
+        fi
+    done
+}
+
+time_comparing_2ndarg()                                                                     # porovna datum ze vstupu s argumentem, argument je "mensi", vypise logy po datu
+{
+    while read -r line
+    do
+        if cmp_int_list  "$( echo "$line" | write_time | convert_log_datetime )" "$1"
+        then
+            echo "$line"                        
+        fi
+    done
+}
+
+time_comparing_1starg()                                                                     # porovna datum ze vstupu s argumentem, argument je "vetsi", vypise logy pred datem
+{
+    while read -r line 
+    do
+        if cmp_int_list "$1" "$( echo "$line" | write_time | convert_log_datetime )"
+        then
+            echo "$line"                        
+        fi
+    done
+}
+
+cmp_int_list()
+{
+    if [ "$1" = "$2" ] ; then return 1 ; fi
+    if [ -n "$1" ] && [ -n "$2" ]                                                                                           # idealne prijma 2 argumenty  more less
+    then
+        if [ "$( echo "$1" | grep -o -E '[0-9 ]*' )" = "$1" ] && [ "$( echo "$2" | grep -o -E '[0-9 ]*' )" = "$2" ]
+        then                                                                                                                # predpokladana vetsi hodnota
+            i=1
+            while [ "$i" -le "6" ]
+            do
+                more=$( echo "$1" | awk '{ print $i }' i="$i" )
+                less=$( echo "$2" | awk '{ print $i }' i="$i" )
+                if [ -z "$less" ] ; then less=0 ; fi
+                if [ -z "$more" ] ; then more=0 ; fi
+                if [ "$more" -gt "$less" ]                                                                                  # more je vetsi nez less
+                then 
+                    return 0
+                elif [ "$more" -lt "$less" ]                                                                                # more = less
+                then
+                    return 1 
+                fi                                                                                                          # kdyz neni vetsi, return 
+                i="$(( i + 1 ))"
+            done
+        else
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
+read_flags_arg()
+{
+    i=1
+    flags=""
+    while [  "$i" -le "$#" ]
+    do
+        arg=$( eval echo "\$$i" | grep -o -E '^-a$|^-b$|^-uri$|^-ip$')               # dokud nacita arg ve formatu flagu, ulozi jej a ulozi take argumant flagu (explicitne pricte 1 v seznamu argumentu)       
+        flags="$flags $arg"
+        if [ -n "$arg" ]
+        then
+            i="$(( i + 1 ))"
+            case $arg in
+            -a|-b)
+                arg="$( eval echo "\$$i" )"
+                if echo "$arg" | grep -E -q '^[0-9]{4}-(1[0-2]|0[0-9])-(3[0-1]|[0-2][0-9]) (2[0-4]|[0-1][0-9]):(60|[0-5][0-9]):(60|[0-5][0-9])$'
+                then 
+                    arg="$( echo "$arg" | sed -r 's/ /-/g' )"
+                    flags="$flags $arg"
+                    i="$(( i + 1 ))"
+                else
+                    exit 1
+                fi
+                ;;
+            -uri)
+                arg="$( eval echo "\$$i" )"
+                if echo "$arg" | grep -E -o -q '^/.*$'
+                then 
+                    flags="$flags $arg"
+                    i="$(( i + 1 ))"
+                else
+                    exit 1
+                fi
+                ;;
+            -ip)
+                arg="$( eval echo "\$$i" )"
+                if  echo "$arg" | grep -E -o -q '^(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}$|^([0-9a-fA-F]{0,4})?(:[0-9a-fA-F]{0,4}){2,7}$'
+                then 
+                    flags="$flags $arg"
+                    i="$(( i + 1 ))"
+                else
+                    exit 1
+                fi
+                ;;
+            *)
+                exit 1
+                ;;
+            esac
+        else
+            break
+        fi
+    done
+    echo "$i|$flags" 
+}
+
+filter_flags()                                                                                      # filtruje vstupni data podle prepinacu
+{
+    if [ -z "$2" ] ; then grep -E '.*' ; return ; fi
+    i="$(( $1 * 2 - 1 ))"
+    flag=$( echo "$2" | awk '{ print $i }' i="$i" | tr -d " " )                                  # prepinac
+    arg=$( echo "$2" | awk '{ print $i }' i="$(( i + 1 ))" )                                 # jeho argument
+    if [ -z "$flag" ] || [ -z "$arg" ] ; then grep -E '.*'  ; fi                                                # prepinac i argument musi mit nejakou hodnotu
+    case "$flag" in
+        -a) 
+            time_comparing_2ndarg "$( echo "$arg" | convert_arg_datetime )"             
+            ;;
+        -b)
+            time_comparing_1starg "$( echo "$arg" | convert_arg_datetime )"
+            ;;
+        -uri) 
+            grep -E -e "GET $arg"
+            ;;
+        -ip) 
+            grep -E -e "^$arg"
+            ;;
+        *) 
+            grep -e ''
+            ;;
+    esac
+}
+
+filter_flags4()
+{    
+    filter_flags "1" "$1" | filter_flags "2" "$1" | filter_flags "3" "$1" | filter_flags "4" "$1" 
+}
+
+read_program_arg()
+{
+    i="$1"
+    i="$(( i + 1 ))"
+    prog=$( eval echo "\$$i" | grep -o -E '^list-ip$|^list-uri$|^list-hosts$|^hist-ip$|^hist-load$')          # nacte program
+    if [ -n "$prog" ]
+    then
+        i="$(( i + 1 ))"
+        echo "$i|$prog"
+        return "0"   
+    fi
+    echo "$i|"
+}
+
+read_program()                                                                         # switch pro spusteni ruznych programu
+{
+    case "$1" in
+        list-ip)
+            write_ip | sort -u                                                    # vypise ip adresy ze stdin, nasledne je seradi a vyskyty unifikuje
+            ;;
+        list-hosts)
+            write_ip | sort -u | ip_hosts                                         # jednotlive ip adresy zkusi identifikovat
+            ;;
+        list-uri)
+            write_uri | sort -u                                                    # vyhleda ze stdin stringy odpovidajici URI
+            ;;
+        hist-ip)
+            write_ip | sort -u | hist_ip "$2" "$3"           # zobrazi pocet vyskytu jednostlivych ip adres
+            ;;
+        hist-load)
+            write_time | sort -u | grep -o -E '[0-9]{2}/[a-zA-Z]{3}/[0-9]{4}(:[0-9]{2})' | sort -u | hist_load "$2" "$3"  # pocita po hodinach, minuty odstraneny
+            ;;
+        *)
+            grep ''
+            ;;                                                              # defaultni stav - vypise ip adresy
+    esac
+}
+
+read_logs_arg()                                                                         # zpracuje argumenty skriptu a posle je dal    Oskliva funkce
+{      
+    logs=""        
+    i="$1"                                                                   
+    while [ "$i" -le "$#" ]                                                                                # nacte ostatni argumenty ktere bere automaticky jako soubor *.log
+    do
+        arg=$( eval echo "\${$i}" )
+        if [ -e "$arg" ]       # -e file exists                                                                             # arg je dalsim argumentem
+        then
+            logs="$logs $arg"                                                                               # 
+        else
+            exit 1
+        fi
+        i="$(( i + 1 ))"
+    done
+    echo "$logs"
+}
+
+read_logs()                                                                         # precte logy ze souboru jejich nazvy jsou argumentem funkce
+{
+    if [ -n "$1" ]
+    then
+        echo "$1" | grep -E -o '[^ ]+' | while read -r line                                # kazdy soubor da na svuj radek, probehne testovani pripony a pokud
+        do                                                                                               # soubor konci *.gz, provede se odzipovani
+            if echo "$line" | grep -q -E '\.gz$'
+            then
+                zcat "$line"
+            else
+                cat "$line"
+            fi
+        done
+    else
+        grep ''
+    fi
+}
+
+
+getflags="$( read_flags_arg "$@" )"
+if [ "$?" -gt "0" ] ; then exit 1 ; fi
+
+i="$( echo "$getflags" | cut -d "|" -f 1 )"
+flags="$( echo "$getflags" | cut -d "|" -f 2 )"
+
+getprogram="$( read_program_arg "$i" "$@" )"
+if [ "$?" -gt "0" ] ; then exit 1 ; fi
+
+i="$( echo "$getprogram" | cut -d "|" -f 1 )"
+
+program="$( echo "$getprogram" | cut -d "|" -f 2 )"
+
+logs="$( read_logs_arg "$i" "$@" )"
+
+if [ "$?" -gt "0" ] ; then exit 1 ; fi
+
+read_logs "$logs" | filter_flags4 "$flags" | read_program "$program" "$logs" "$flags"
